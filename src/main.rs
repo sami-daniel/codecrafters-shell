@@ -1,13 +1,17 @@
-use std::env;
+use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::env;
+use std::ptr::{null_mut};
 use std::{io::stdout, process::ExitCode};
+
+use nix::libc::{fork, waitpid};
 
 enum Supported {
     Echo,
     Exit,
     Type,
-    Partial(String),
+    Partial,
     Unknown,
 }
 
@@ -17,7 +21,14 @@ impl Supported {
             "echo" => Self::Echo,
             "exit" => Self::Exit,
             "type" => Self::Type,
-            _ => Self::Unknown,
+            _ => {
+                let s_command = String::from(command);
+                if Command::exists(&s_command) {
+                    return Self::Partial;
+                }
+
+                Self::Unknown
+            }
         }
     }
 
@@ -32,7 +43,8 @@ impl Supported {
 struct Command {
     name: String,
     args: Vec<String>,
-    path: Option<PathBuf>
+    path: Option<PathBuf>,
+    kind: Supported,
 }
 
 impl Command {
@@ -40,10 +52,19 @@ impl Command {
         let mut parts = input.trim().split_whitespace();
         if let Some(name) = parts.next() {
             let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+            let kind = Supported::from_str(name);
+
+            let path = if let Supported::Partial = kind {
+                Command::load_extern_path(&name)
+            } else {
+                None
+            };
+
             Some(Command {
                 name: name.to_string(),
                 args,
-                path: None
+                path,
+                kind,
             })
         } else {
             None
@@ -59,27 +80,38 @@ impl Command {
                     name: command.to_string(),
                     args: vec![],
                     path: Some(full_path),
+                    kind: Supported::Partial,
                 });
             }
         }
         None
     }
 
+    fn load_extern_path(command: &str) -> Option<PathBuf> {
+        let path_dirs = env::var("PATH").ok()?;
+        for dir in path_dirs.split(':') {
+            let full_path = Path::new(dir).join(command);
+            if full_path.exists() && full_path.is_file() {
+                return Some(full_path);
+            }
+        }
+        None
+    }
+
     fn exists(path: &String) -> bool {
-        Self::load_extern(path).is_some()
+        Self::load_extern_path(path).is_some()
     }
 
     fn execute(&self, output_buf: &mut Vec<u8>) -> Option<ExitCode> {
-        match Supported::from_str(&self.name) {
+        match self.kind {
             Supported::Echo => {
                 for arg in &self.args {
                     output_buf.write_all(arg.as_bytes()).unwrap();
                     output_buf.push(b' ');
                 }
-
+                
                 output_buf.pop();
                 output_buf.push(b'\n');
-
                 None
             }
             Supported::Exit => {
@@ -94,12 +126,16 @@ impl Command {
                 if let Some(cmd) = self.args.get(0) {
                     if Supported::is_shell_builtin(cmd) {
                         writeln!(output_buf, "{} is a shell builtin", cmd).unwrap();
+                    } else if let Some(command) = Command::load_extern(cmd) {
+                        writeln!(
+                            output_buf,
+                            "{} is {}",
+                            cmd,
+                            command.path.unwrap().as_path().display()
+                        )
+                        .unwrap();
                     } else {
-                        if let Some(command) = Command::load_extern(cmd) {
-                            writeln!(output_buf, "{} is {}", cmd, command.path.unwrap().as_path().display()).unwrap();
-                        } else {
-                            writeln!(output_buf, "{}: not found", cmd).unwrap();
-                        }
+                        writeln!(output_buf, "{}: not found", cmd).unwrap();
                     }
                 }
                 None
@@ -108,8 +144,33 @@ impl Command {
                 writeln!(output_buf, "{}: command not found", self.name).unwrap();
                 None
             }
-            _ => None,
+            Supported::Partial => {               
+                let pid = unsafe {
+                    fork()
+                };
+                
+                match pid {
+                    0 => {
+                        self.exec_from_execve();
+
+                        None // if we came here, means that execve failed
+                    },
+                    _ => {
+                        unsafe { waitpid(0, null_mut(), 0); }
+                        None // Means that i'm parent or the fork process failed
+                    }
+                }
+            }
         }
+    }
+
+    fn exec_from_execve(&self) {
+        let c_command = CString::new(self.path.clone().unwrap().as_path().to_str().unwrap()).unwrap();
+        let mut full_args = vec![CString::new(self.name.clone()).unwrap()];
+        full_args.extend(self.args.iter().map(|s| CString::new(s.as_str()).expect("Arg has \\0")));
+        let c_args: Vec<&CStr> = full_args.iter().map(|s| s.as_c_str()).collect();
+        let c_env: Vec<&CStr> = vec![];
+        nix::unistd::execve(&c_command, &c_args, &c_env[..]).unwrap();
     }
 }
 
