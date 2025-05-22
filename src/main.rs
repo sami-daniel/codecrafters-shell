@@ -1,60 +1,134 @@
-#[allow(unused_imports)]
+use std::env;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::{io::stdout, process::ExitCode};
 
-fn main() -> ExitCode {
-    let mut output_buf: Vec<u8> = vec![];
-    loop {
-        output_buf.clear();
-        print!("$ ");
-        io::stdout().flush().unwrap();
+enum Supported {
+    Echo,
+    Exit,
+    Type,
+    Partial(String),
+    Unknown,
+}
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-        let mut parts = input.trim().split(' ').into_iter();
-        let available_commands= vec!["echo", "exit", "type"];
-        let mut output = stdout().lock();
-        output.flush().unwrap();
-
-        if let Some(command) = parts.next() {
-            match command {
-                "exit" => {
-                    let exit_code = parts
-                        .next()
-                        .unwrap_or(&"0")
-                        .to_string()
-                        .parse::<u8>()
-                        .unwrap_or(0);
-                    return ExitCode::from(exit_code);
-                }
-                "echo" => {
-                    while let Some(payload) = parts.next() {
-                        output_buf.write_all(payload.as_bytes()).unwrap();
-                        output_buf.push(b' ');
-                    }
-                    output_buf.remove(output_buf.len() - 1);
-                    output_buf.push(b'\n');
-                }
-                "type" => {
-                    if let Some(payload) = parts.next() {
-                        if available_commands.contains(&payload) {
-                            output_buf.write_all(format!("{payload} is a shell builtin\n").as_bytes()).unwrap();
-                        } else {
-                            output_buf.write_all(format!("{payload}: not found\n").as_bytes()).unwrap();
-                        }
-                    }
-                }
-                _ => {
-                    report_not_recognized_command(&mut output_buf, command.trim());
-                }
-            }
+impl Supported {
+    fn from_str(command: &str) -> Self {
+        match command {
+            "echo" => Self::Echo,
+            "exit" => Self::Exit,
+            "type" => Self::Type,
+            _ => Self::Unknown,
         }
+    }
 
-        output.write_all(&output_buf[..]).unwrap();
+    fn is_shell_builtin(command: &str) -> bool {
+        matches!(
+            Self::from_str(command),
+            Supported::Echo | Supported::Exit | Supported::Type
+        )
     }
 }
 
-#[inline(always)]
-fn report_not_recognized_command(output: &mut Vec<u8>, command: &str) {
-    output.write_all(format!("{}: command not found\n", &command.trim()).as_bytes()).unwrap();
+struct Command {
+    name: String,
+    args: Vec<String>,
+    path: Option<PathBuf>
+}
+
+impl Command {
+    fn parse(input: &str) -> Option<Self> {
+        let mut parts = input.trim().split_whitespace();
+        if let Some(name) = parts.next() {
+            let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+            Some(Command {
+                name: name.to_string(),
+                args,
+                path: None
+            })
+        } else {
+            None
+        }
+    }
+
+    fn load_extern(command: &String) -> Option<Self> {
+        let path_dirs = env::var("PATH").ok()?;
+        for dir in path_dirs.split(':') {
+            let full_path = Path::new(dir).join(command);
+            if full_path.exists() && full_path.is_file() {
+                return Some(Command {
+                    name: command.to_string(),
+                    args: vec![],
+                    path: Some(full_path),
+                });
+            }
+        }
+        None
+    }
+
+    fn exists(path: &String) -> bool {
+        Self::load_extern(path).is_some()
+    }
+
+    fn execute(&self, output_buf: &mut Vec<u8>) -> Option<ExitCode> {
+        match Supported::from_str(&self.name) {
+            Supported::Echo => {
+                for arg in &self.args {
+                    output_buf.write_all(arg.as_bytes()).unwrap();
+                    output_buf.push(b' ');
+                }
+
+                output_buf.pop();
+                output_buf.push(b'\n');
+
+                None
+            }
+            Supported::Exit => {
+                let code = self
+                    .args
+                    .get(0)
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+                Some(ExitCode::from(code))
+            }
+            Supported::Type => {
+                if let Some(cmd) = self.args.get(0) {
+                    if Supported::is_shell_builtin(cmd) {
+                        writeln!(output_buf, "{} is a shell builtin", cmd).unwrap();
+                    } else {
+                        if let Some(command) = Command::load_extern(cmd) {
+                            writeln!(output_buf, "{} is {}", cmd, command.path.unwrap().as_path().display()).unwrap();
+                        }
+                    }
+                }
+                None
+            }
+            Supported::Unknown => {
+                writeln!(output_buf, "{}: command not found", self.name).unwrap();
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut output_buf: Vec<u8> = vec![];
+    let mut output = stdout().lock();
+
+    loop {
+        output_buf.clear();
+        print!("$ ");
+        output.flush().unwrap();
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+
+        if let Some(command) = Command::parse(&input) {
+            if let Some(code) = command.execute(&mut output_buf) {
+                return code;
+            }
+        }
+
+        output.write_all(&output_buf).unwrap();
+    }
 }
