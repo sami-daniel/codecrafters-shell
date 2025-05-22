@@ -56,5 +56,5 @@ fn main() -> ExitCode {
 
 #[inline(always)]
 fn report_not_recognized_command(output: &mut Vec<u8>, command: &str) {
-    output.write_all(format!("{}: command not found", &command.trim()).as_bytes()).unwrap();
+    output.write_all(format!("{}: command not found\n", &command.trim()).as_bytes()).unwrap();
 }
