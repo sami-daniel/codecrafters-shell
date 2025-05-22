@@ -32,7 +32,7 @@ impl Supported {
 struct Command {
     name: String,
     args: Vec<String>,
-    path: Option<PathBuf>
+    path: Option<PathBuf>,
 }
 
 impl Command {
@@ -43,7 +43,7 @@ impl Command {
             Some(Command {
                 name: name.to_string(),
                 args,
-                path: None
+                path: None,
             })
         } else {
             None
@@ -96,19 +96,32 @@ impl Command {
                         writeln!(output_buf, "{} is a shell builtin", cmd).unwrap();
                     } else {
                         if let Some(command) = Command::load_extern(cmd) {
-                            writeln!(output_buf, "{} is {}", cmd, command.path.unwrap().as_path().display()).unwrap();
+                            writeln!(
+                                output_buf,
+                                "{} is {}",
+                                cmd,
+                                command.path.unwrap().as_path().display()
+                            )
+                            .unwrap();
+                        } else {
+                            report_not_found(output_buf, &cmd);
                         }
                     }
                 }
                 None
             }
             Supported::Unknown => {
-                writeln!(output_buf, "{}: command not found", self.name).unwrap();
+                report_not_found(output_buf, &self.name);
                 None
             }
             _ => None,
         }
     }
+}
+
+#[inline(always)]
+fn report_not_found(output: &mut Vec<u8>, cmd: &String) {
+    writeln!(output, "{}: command not found", cmd).unwrap();
 }
 
 fn main() -> ExitCode {
