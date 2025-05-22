@@ -1,8 +1,8 @@
+use std::env::{self, set_current_dir};
 use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::env;
-use std::ptr::{null_mut};
+use std::ptr::null_mut;
 use std::{io::stdout, process::ExitCode};
 
 use nix::libc::{fork, waitpid};
@@ -13,7 +13,8 @@ enum Supported {
     Type,
     Partial,
     Unknown,
-    Pwd
+    PrintWorkingDirectory,
+    ChangeDirectory
 }
 
 impl Supported {
@@ -22,7 +23,8 @@ impl Supported {
             "echo" => Self::Echo,
             "exit" => Self::Exit,
             "type" => Self::Type,
-            "pwd" => Self::Pwd,
+            "pwd" => Self::PrintWorkingDirectory,
+            "cd" => Self::ChangeDirectory,
             _ => {
                 let s_command = String::from(command);
                 if Command::exists(&s_command) {
@@ -37,7 +39,7 @@ impl Supported {
     fn is_shell_builtin(command: &str) -> bool {
         matches!(
             Self::from_str(command),
-            Supported::Echo | Supported::Exit | Supported::Type | Supported::Pwd
+            Supported::Echo | Supported::Exit | Supported::Type | Supported::PrintWorkingDirectory
         )
     }
 }
@@ -111,7 +113,7 @@ impl Command {
                     output_buf.write_all(arg.as_bytes()).unwrap();
                     output_buf.push(b' ');
                 }
-                
+
                 output_buf.pop();
                 output_buf.push(b'\n');
                 None
@@ -146,25 +148,35 @@ impl Command {
                 writeln!(output_buf, "{}: command not found", self.name).unwrap();
                 None
             }
-            Supported::Partial => {               
-                let pid = unsafe {
-                    fork()
-                };
-                
+            Supported::Partial => {
+                let pid = unsafe { fork() };
+
                 match pid {
                     0 => {
                         self.exec_from_execve();
 
                         None // if we came here, means that execve failed
-                    },
+                    }
                     _ => {
-                        unsafe { waitpid(0, null_mut(), 0); }
+                        unsafe {
+                            waitpid(0, null_mut(), 0);
+                        }
                         None // Means that i'm parent or the fork process failed
                     }
                 }
+            }
+            Supported::PrintWorkingDirectory => {
+                writeln!(
+                    output_buf,
+                    "{}",
+                    Self::get_cwd()
+                )
+                .unwrap();
+
+                None
             },
-            Supported::Pwd => {
-                writeln!(output_buf, "{}", env::current_dir().unwrap().to_str().unwrap()).unwrap();
+            Supported::ChangeDirectory => {
+                set_current_dir(Path::new(Self::get_cwd().as_str()).join(Path::new(self.args.first().unwrap()))).unwrap();
 
                 None
             }
@@ -172,12 +184,22 @@ impl Command {
     }
 
     fn exec_from_execve(&self) {
-        let c_command = CString::new(self.path.clone().unwrap().as_path().to_str().unwrap()).unwrap();
+        let c_command =
+            CString::new(self.path.clone().unwrap().as_path().to_str().unwrap()).unwrap();
         let mut full_args = vec![CString::new(self.name.clone()).unwrap()];
-        full_args.extend(self.args.iter().map(|s| CString::new(s.as_str()).expect("Arg has \\0")));
+        full_args.extend(
+            self.args
+                .iter()
+                .map(|s| CString::new(s.as_str()).expect("Arg has \\0")),
+        );
         let c_args: Vec<&CStr> = full_args.iter().map(|s| s.as_c_str()).collect();
         let c_env: Vec<&CStr> = vec![];
         nix::unistd::execve(&c_command, &c_args, &c_env[..]).unwrap();
+    }
+
+    #[inline(always)]
+    fn get_cwd() -> String {
+        env::current_dir().unwrap().to_str().unwrap().to_string()
     }
 }
 
