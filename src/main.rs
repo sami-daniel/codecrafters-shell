@@ -176,7 +176,12 @@ impl Command {
                 None
             },
             Supported::ChangeDirectory => {
-                set_current_dir(Path::new(Self::get_cwd().as_str()).join(Path::new(self.args.first().unwrap()))).unwrap();
+                let path = Path::new(Self::get_cwd().as_str()).join(Path::new(self.args.first().unwrap()));
+                if let Err(_) = set_current_dir(&path) {
+                    writeln!(output_buf, "cd: {}: No such file or directory", path.to_str().unwrap()).unwrap();
+
+                    return None;
+                }
 
                 None
             }
