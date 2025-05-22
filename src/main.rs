@@ -37,7 +37,7 @@ impl Supported {
     fn is_shell_builtin(command: &str) -> bool {
         matches!(
             Self::from_str(command),
-            Supported::Echo | Supported::Exit | Supported::Type
+            Supported::Echo | Supported::Exit | Supported::Type | Supported::Pwd
         )
     }
 }
@@ -165,7 +165,7 @@ impl Command {
             },
             Supported::Pwd => {
                 writeln!(output_buf, "{}", env::current_dir().unwrap().to_str().unwrap()).unwrap();
-                
+
                 None
             }
         }
