@@ -13,6 +13,7 @@ enum Supported {
     Type,
     Partial,
     Unknown,
+    Pwd
 }
 
 impl Supported {
@@ -21,6 +22,7 @@ impl Supported {
             "echo" => Self::Echo,
             "exit" => Self::Exit,
             "type" => Self::Type,
+            "pwd" => Self::Pwd,
             _ => {
                 let s_command = String::from(command);
                 if Command::exists(&s_command) {
@@ -160,6 +162,11 @@ impl Command {
                         None // Means that i'm parent or the fork process failed
                     }
                 }
+            },
+            Supported::Pwd => {
+                writeln!(output_buf, "{}", env::current_dir().unwrap().to_str().unwrap()).unwrap();
+                
+                None
             }
         }
     }
