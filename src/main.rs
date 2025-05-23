@@ -126,7 +126,8 @@ impl Command {
                     }
                 }
                 LITERAL_BACKSLASH if in_double_quotes && !in_single_quotes => {
-                    // only a few chars are escapable in double quotes
+                    // only a few chars are escapable in double quotes, in single
+                    // quotes, everything is literal
 
                     // we assume that will never be equals to none. This would happen
                     // if and only if the " was not closed, then it will escape the \n
@@ -134,12 +135,9 @@ impl Command {
                     let next = chars.next().expect(UNEXPECTED_BEHAVIOR);
 
                     match next {
-                        '\\' => {
-                            word_buf.push(next);
-                        }
-                        '$' => {
-                            word_buf.push(next);
-                        }
+                        '\\' => word_buf.push(next),
+                        '$' => word_buf.push(next),
+                        '\"' => word_buf.push(next),
                         _ => word_buf.extend(vec![c, next]),
                     }
                 }
@@ -151,9 +149,9 @@ impl Command {
                     let next = chars.next().expect(UNEXPECTED_BEHAVIOR);
 
                     match next {
-                        ' ' => {
-                            word_buf.push(next);
-                        }
+                        ' ' => word_buf.push(next),
+                        '\'' => word_buf.push(next),
+                        '\"' => word_buf.push(next),
                         _ => word_buf.extend(vec![c, next]),
                     }
                 }
