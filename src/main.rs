@@ -152,7 +152,7 @@ impl Command {
                         ' ' => word_buf.push(next),
                         '\'' => word_buf.push(next),
                         '\"' => word_buf.push(next),
-                        _ => word_buf.extend(vec![c, next]),
+                        _ => word_buf.push(next),
                     }
                 }
                 _ => word_buf.push(c),
