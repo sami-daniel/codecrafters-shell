@@ -1,14 +1,13 @@
+use anyhow::{Context, Result};
+use nix::libc::{fork, waitpid};
 use std::{
     env::{self, set_current_dir},
-    ffi::{CStr, CString, NulError},
+    ffi::{CStr, CString},
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitCode,
     ptr::null_mut,
 };
-
-use anyhow::{Context, Result};
-use nix::libc::{fork, waitpid};
 
 fn main() -> ExitCode {
     match run() {
@@ -34,7 +33,7 @@ fn run() -> Result<ExitCode> {
             .read_line(&mut input)
             .context("Failed to read input")?;
 
-        if let Some(command) = Command::parse(&input)? {
+        if let Some(command) = &mut Command::parse(&input)? {
             if let Some(code) = command.execute(&mut output_buf)? {
                 return Ok(code);
             }
@@ -91,17 +90,55 @@ impl Supported {
 
 impl Command {
     fn parse(input: &str) -> Result<Option<Self>> {
-        let mut parts = input.split_whitespace();
-        if let Some(name) = parts.next() {
-            let args = parts.map(str::to_string).collect();
-            let kind = Supported::from_str(name);
-
+        let parts = input.splitn(2, ' ').collect::<Vec<&str>>();
+        let chars = parts.last().unwrap().trim().chars();
+        let mut args: Vec<String> = vec![];
+        let mut in_single_quotes = false;
+        let mut in_double_quotes = false;
+        let mut word_buf = String::new();
+    
+        for ch in chars {
+            match ch {
+                '"' => {
+                    if !in_single_quotes {
+                        in_double_quotes = !in_double_quotes;
+                        continue;
+                    } else {
+                        word_buf.push(ch);
+                    }
+                }
+                '\'' => {
+                    if !in_double_quotes {
+                        in_single_quotes = !in_single_quotes;
+                        continue;
+                    } else {
+                        word_buf.push(ch);
+                    }
+                }
+                ' ' if !in_single_quotes && !in_double_quotes => {
+                    if !word_buf.is_empty() {
+                        args.push(word_buf.clone());
+                        word_buf.clear();
+                    }
+                }
+                _ => word_buf.push(ch),
+            }
+        }
+    
+        if !word_buf.is_empty() {
+            args.push(word_buf);
+        }
+    
+        dbg!(&args);
+    
+        if let Some(name) = parts.first().cloned() {
+            let kind = Supported::from_str(&name);
             let path = if let Supported::Partial = kind {
-                Self::load_extern_path(name)
+                Self::load_extern_path(&name)
             } else {
                 None
             };
-
+    
             Ok(Some(Self {
                 name: name.to_string(),
                 args,
@@ -144,15 +181,18 @@ impl Command {
         Self::load_extern_path(path).is_some()
     }
 
-    fn execute(&self, output_buf: &mut Vec<u8>) -> Result<Option<ExitCode>> {
+    fn execute(&mut self, output_buf: &mut Vec<u8>) -> Result<Option<ExitCode>> {
+        for i in 0..self.args.len() {
+            if self.args[i].contains("~") {
+                let new = self.args[i].replace("~", Self::get_home()?.as_str());
+                self.args[i] = new;
+            }
+        }
         match self.kind {
             Supported::Echo => {
                 for arg in &self.args {
                     output_buf.write_all(arg.as_bytes())?;
                     output_buf.push(b' ');
-                }
-                if !self.args.is_empty() {
-                    output_buf.pop();
                 }
                 output_buf.push(b'\n');
                 Ok(None)
@@ -202,7 +242,9 @@ impl Command {
             }
             Supported::ChangeDirectory => {
                 let path = match self.args.first() {
-                    Some(p) if p == "~" => PathBuf::from(Self::get_home()?),
+                    Some(p) if p.starts_with("~") => {
+                        PathBuf::from(Self::get_home()?).join(Path::new(&p[1..]))
+                    }
                     Some(p) => Path::new(&Self::get_cwd()?).join(p),
                     None => PathBuf::from(Self::get_home()?),
                 };
@@ -228,15 +270,13 @@ impl Command {
                 .to_str()
                 .context("Path contains invalid UTF-8")?,
         )?;
-
         let mut full_args = vec![CString::new(self.name.clone())?];
         full_args.extend(
             self.args
                 .iter()
                 .map(|s| CString::new(s.as_str()))
-                .collect::<Result<Vec<CString>, NulError>>()?,
+                .collect::<Result<Vec<_>, _>>()?,
         );
-
         let c_args: Vec<&CStr> = full_args.iter().map(|s| s.as_c_str()).collect();
         let c_env: Vec<&CStr> = vec![];
 
