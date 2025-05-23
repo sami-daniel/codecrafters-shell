@@ -129,7 +129,7 @@ impl Command {
             args.push(word_buf);
         }
     
-        dbg!(&args);
+        // dbg!(&args);
     
         if let Some(name) = parts.first().cloned() {
             let kind = Supported::from_str(&name);
