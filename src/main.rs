@@ -96,7 +96,7 @@ impl Command {
         let mut in_single_quotes = false;
         let mut in_double_quotes = false;
         let mut word_buf = String::new();
-    
+
         for ch in chars {
             match ch {
                 '"' => {
@@ -124,21 +124,22 @@ impl Command {
                 _ => word_buf.push(ch),
             }
         }
-    
+
         if !word_buf.is_empty() {
             args.push(word_buf);
         }
-    
+
         // dbg!(&args);
-    
+
         if let Some(name) = parts.first().cloned() {
+            let name = name.trim();
             let kind = Supported::from_str(&name);
             let path = if let Supported::Partial = kind {
                 Self::load_extern_path(&name)
             } else {
                 None
             };
-    
+
             Ok(Some(Self {
                 name: name.to_string(),
                 args,
