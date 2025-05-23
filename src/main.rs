@@ -9,6 +9,8 @@ use std::{
     ptr::null_mut,
 };
 
+const UNEXPECTED_BEHAVIOR: &str = "Unespected behavior has happened";
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
@@ -90,21 +92,23 @@ impl Supported {
 
 impl Command {
     fn parse(input: &str) -> Result<Option<Self>> {
+        const LITERAL_BACKSLASH: char = '\\';
+
         let parts = input.splitn(2, ' ').collect::<Vec<&str>>();
-        let chars = parts.last().unwrap().trim().chars();
+        let mut chars = parts.last().unwrap().trim().chars();
         let mut args: Vec<String> = vec![];
         let mut in_single_quotes = false;
         let mut in_double_quotes = false;
         let mut word_buf = String::new();
 
-        for ch in chars {
-            match ch {
+        while let Some(c) = chars.next() {
+            match c {
                 '"' => {
                     if !in_single_quotes {
                         in_double_quotes = !in_double_quotes;
                         continue;
                     } else {
-                        word_buf.push(ch);
+                        word_buf.push(c);
                     }
                 }
                 '\'' => {
@@ -112,7 +116,7 @@ impl Command {
                         in_single_quotes = !in_single_quotes;
                         continue;
                     } else {
-                        word_buf.push(ch);
+                        word_buf.push(c);
                     }
                 }
                 ' ' if !in_single_quotes && !in_double_quotes => {
@@ -121,7 +125,39 @@ impl Command {
                         word_buf.clear();
                     }
                 }
-                _ => word_buf.push(ch),
+                LITERAL_BACKSLASH if in_double_quotes && !in_single_quotes => {
+                    // only a few chars are escapable in double quotes
+
+                    // we assume that will never be equals to none. This would happen
+                    // if and only if the " was not closed, then it will escape the \n
+                    // and open a new secundary prompt in a line down
+                    let next = chars.next().expect(UNEXPECTED_BEHAVIOR);
+
+                    match next {
+                        '\\' => {
+                            word_buf.push(next);
+                        }
+                        '$' => {
+                            word_buf.push(next);
+                        }
+                        _ => word_buf.extend(vec![c, next]),
+                    }
+                }
+                LITERAL_BACKSLASH if !in_double_quotes && !in_single_quotes => {
+                    // we assume that will never be equals to none. Then it will
+                    // escape the \n (hidden) and open a new secundary prompt
+                    // in a line down
+
+                    let next = chars.next().expect(UNEXPECTED_BEHAVIOR);
+
+                    match next {
+                        ' ' => {
+                            word_buf.push(next);
+                        }
+                        _ => word_buf.extend(vec![c, next]),
+                    }
+                }
+                _ => word_buf.push(c),
             }
         }
 
