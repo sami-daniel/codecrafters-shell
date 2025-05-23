@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
-use nix::libc::{fork, waitpid};
+use anyhow::{Context, Ok, Result};
+use nix::libc::{close, dup, dup2, fork, open, waitpid, O_APPEND, O_CREAT, O_WRONLY};
 use std::{
     env::{self, set_current_dir},
     ffi::{CStr, CString},
@@ -7,13 +7,14 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
     ptr::null_mut,
+    str::FromStr,
 };
 
-const UNEXPECTED_BEHAVIOR: &str = "Unespected behavior has happened";
+const UNEXPECTED_BEHAVIOR_MSG: &str = "Unespected behavior has happened";
 
 fn main() -> ExitCode {
     match run() {
-        Ok(code) => code,
+        std::result::Result::Ok(code) => code,
         Err(err) => {
             eprintln!("Error: {}", err);
             ExitCode::FAILURE
@@ -57,11 +58,30 @@ enum Supported {
     ChangeDirectory,
 }
 
+#[derive(Debug)]
+enum Target {
+    File(PathBuf), // maybe we can do fd redirect
+}
+
+#[derive(Debug)]
+enum Mode {
+    Write,
+    Append,
+}
+
 struct Command {
     name: String,
     args: Vec<String>,
     path: Option<PathBuf>,
     kind: Supported,
+    redirects: Vec<Redirect>,
+}
+
+#[derive(Debug)]
+struct Redirect {
+    fd: i32,
+    target: Target,
+    mode: Mode,
 }
 
 impl Supported {
@@ -95,11 +115,13 @@ impl Command {
         const LITERAL_BACKSLASH: char = '\\';
 
         let parts = input.splitn(2, ' ').collect::<Vec<&str>>();
-        let mut chars = parts.last().unwrap().trim().chars();
+        let mut chars = parts.last().unwrap().trim().chars().peekable();
         let mut args: Vec<String> = vec![];
+        let mut redirects = vec![];
         let mut in_single_quotes = false;
         let mut in_double_quotes = false;
         let mut word_buf = String::new();
+        let mut current_redirect: Option<(i32, Mode)> = None;
 
         while let Some(c) = chars.next() {
             match c {
@@ -109,6 +131,21 @@ impl Command {
                         continue;
                     } else {
                         word_buf.push(c);
+                    }
+                }
+                '>' if !in_double_quotes && !in_single_quotes => {
+                    let mode = if chars.peek() == Some(&'>') {
+                        chars.next();
+                        Mode::Append
+                    } else {
+                        Mode::Write
+                    };
+
+                    if let std::result::Result::Ok(num) = word_buf.parse::<i32>() {
+                        current_redirect = Some((num, mode));
+                        word_buf.clear();
+                    } else {
+                        current_redirect = Some((1, mode));
                     }
                 }
                 '\'' => {
@@ -132,7 +169,7 @@ impl Command {
                     // we assume that will never be equals to none. This would happen
                     // if and only if the " was not closed, then it will escape the \n
                     // and open a new secundary prompt in a line down
-                    let next = chars.next().expect(UNEXPECTED_BEHAVIOR);
+                    let next = chars.next().expect(UNEXPECTED_BEHAVIOR_MSG);
 
                     match next {
                         '\\' => word_buf.push(next),
@@ -146,7 +183,7 @@ impl Command {
                     // escape the \n (hidden) and open a new secundary prompt
                     // in a line down
 
-                    let next = chars.next().expect(UNEXPECTED_BEHAVIOR);
+                    let next = chars.next().expect(UNEXPECTED_BEHAVIOR_MSG);
 
                     match next {
                         ' ' => word_buf.push(next),
@@ -155,7 +192,30 @@ impl Command {
                         _ => word_buf.push(next),
                     }
                 }
-                _ => word_buf.push(c),
+                _ => {
+                    if current_redirect.is_none() {
+                        word_buf.push(c);
+                        continue;
+                    }
+
+                    word_buf.push(c);
+                    let (fd, mode) = current_redirect.unwrap();
+                    for next_c in chars.by_ref() {
+                        if next_c == ' ' && (!in_single_quotes || !in_double_quotes) {
+                            break;
+                        }
+
+                        word_buf.push(next_c);
+                    }
+
+                    redirects.push(Redirect {
+                        fd,
+                        mode,
+                        target: Target::File(PathBuf::from(word_buf.trim())),
+                    });
+                    word_buf.clear();
+                    current_redirect = None;
+                }
             }
         }
 
@@ -163,13 +223,13 @@ impl Command {
             args.push(word_buf);
         }
 
-        // dbg!(&args);
+        dbg!(&args);
 
         if let Some(name) = parts.first().cloned() {
             let name = name.trim();
-            let kind = Supported::from_str(&name);
+            let kind = Supported::from_str(name);
             let path = if let Supported::Partial = kind {
-                Self::load_extern_path(&name)
+                Self::load_extern_path(name)
             } else {
                 None
             };
@@ -179,10 +239,60 @@ impl Command {
                 args,
                 path,
                 kind,
+                redirects,
             }))
         } else {
             Ok(None)
         }
+    }
+
+    fn with_redirects<F>(&self, exec: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let mut saved_fds = vec![];
+
+        for redirect in self.redirects.iter() {
+            dbg!(&&redirect);
+
+            let dup_fd = unsafe { dup(redirect.fd) };
+            saved_fds.push((redirect.fd, dup_fd));
+
+            match &redirect.target {
+                Target::File(path_buf) => {
+                    let mut flags = O_CREAT | O_WRONLY;
+                    if let Mode::Append = redirect.mode {
+                        flags |= O_APPEND;
+                    }
+
+                    unsafe {
+                        let file = open(
+                            CString::from_str(
+                                path_buf
+                                    .as_os_str()
+                                    .to_str()
+                                    .expect(UNEXPECTED_BEHAVIOR_MSG),
+                            )?
+                            .as_ptr(),
+                            flags,
+                        );
+                        dup2(file, redirect.fd);
+                        close(file)
+                    };
+                }
+            }
+        }
+
+        let result = exec();
+
+        for (fd, saved) in saved_fds {
+            unsafe { 
+                dup2(saved, fd);
+                close(saved)
+            };
+        }
+
+        result
     }
 
     fn load_extern(command: &String) -> Option<Self> {
@@ -195,6 +305,7 @@ impl Command {
                     args: vec![],
                     path: Some(full_path),
                     kind: Supported::Partial,
+                    redirects: vec![],
                 });
             }
         }
@@ -225,11 +336,16 @@ impl Command {
         }
         match self.kind {
             Supported::Echo => {
-                for arg in &self.args {
-                    output_buf.write_all(arg.as_bytes())?;
-                    output_buf.push(b' ');
-                }
-                output_buf.push(b'\n');
+                Self::with_redirects(self, || {
+                    for arg in &self.args {
+                        output_buf.write_all(arg.as_bytes())?;
+                        output_buf.push(b' ');
+                    }
+                    output_buf.push(b'\n');
+
+                    Ok(())
+                })?;
+
                 Ok(None)
             }
             Supported::Exit => {
@@ -285,11 +401,15 @@ impl Command {
                 };
 
                 if set_current_dir(&path).is_err() {
-                    writeln!(
-                        output_buf,
-                        "cd: {}: No such file or directory",
-                        path.display()
-                    )?;
+                    Self::with_redirects(self, || {
+                        writeln!(
+                            output_buf,
+                            "cd: {}: No such file or directory",
+                            path.display()
+                        )?;
+
+                        Ok(())
+                    })?
                 }
 
                 Ok(None)
