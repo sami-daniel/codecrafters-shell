@@ -140,6 +140,8 @@ impl Completer for AwesomeCompleter {
 
         candidates.sort();
         candidates.dedup();
+        
+        let candidates = candidates.iter().map(|c| format!("{c} ")).collect::<Vec<_>>();
 
         Result::Ok((start, candidates))
     }
