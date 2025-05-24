@@ -208,7 +208,7 @@ impl Command {
             })
         }
 
-        dbg!(&args);
+        ////dbg!(&args);
 
         if let Some(name) = args.first() {
             let name = name.trim();
@@ -238,7 +238,7 @@ impl Command {
         let mut saved_fds = vec![];
 
         for redirect in self.redirects.iter() {
-            dbg!(&&redirect);
+            //dbg!(&&redirect);
 
             let dup_fd = unsafe { dup(redirect.fd) };
             saved_fds.push((redirect.fd, dup_fd));
@@ -423,9 +423,9 @@ impl Command {
         let c_args: Vec<&CStr> = full_args.iter().map(|s| s.as_c_str()).collect();
         let c_env: Vec<&CStr> = vec![];
 
-        dbg!(&c_command);
-        dbg!(&c_args);
-        dbg!(&c_env);
+        //dbg!(&c_command);
+        //dbg!(&c_args);
+        ////dbg!(&c_env);
 
         self.with_redirects(|| {
             nix::unistd::execve(&c_command, &c_args, &c_env).unwrap();
