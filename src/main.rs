@@ -1,6 +1,6 @@
 use anyhow::{Context, Ok, Result};
 use nix::libc::{close, dup, dup2, fork, open, waitpid, O_APPEND, O_CREAT, O_RDWR, O_TRUNC};
-use rustyline::{self, completion::Completer, Editor, Helper, Highlighter, Hinter, Validator};
+use rustyline::{self, completion::Completer, CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator};
 use std::{
     env::{self, set_current_dir},
     ffi::{CStr, CString},
@@ -26,9 +26,13 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode> {
-    let mut editor = Editor::new().context("Failed to create editor")?;
+    let config = Config::builder()
+        .auto_add_history(true)
+        .completion_type(CompletionType::List)
+        .build();
+    let mut editor = Editor::with_config(config).context("Failed to create editor")?;
     editor.set_helper(Some(AwesomeHelper { completer: AwesomeCompleter }));
-
+    
     loop {
         let readline = editor.readline("$ ");
         match readline {
@@ -77,10 +81,14 @@ struct Command {
     redirects: Vec<Redirect>,
 }
 
-#[derive(Helper, Highlighter, Hinter, Validator)]
+struct AwesomeCompleter;
+
+#[derive(Highlighter, Hinter, Validator)]
 struct AwesomeHelper {
     completer: AwesomeCompleter,
 }
+
+impl Helper for AwesomeHelper { }
 
 impl Completer for AwesomeHelper {
     type Candidate = String;
@@ -103,8 +111,6 @@ fn extract_current_word(line: &str, pos: usize) -> (usize, &str) {
         (0, line_up_to_cursor)
     }
 }
-
-struct AwesomeCompleter;
 
 impl Completer for AwesomeCompleter {
     type Candidate = String;
@@ -140,7 +146,7 @@ impl Completer for AwesomeCompleter {
 
         candidates.sort();
         candidates.dedup();
-        
+
         let candidates = candidates.iter().map(|c| format!("{c} ")).collect::<Vec<_>>();
 
         Result::Ok((start, candidates))
