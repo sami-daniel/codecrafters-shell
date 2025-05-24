@@ -113,8 +113,7 @@ impl Supported {
 
 impl Command {
     fn parse(input: &str) -> Result<Option<Self>> {
-        let parts = input.splitn(2, ' ').collect::<Vec<&str>>();
-        let mut chars = parts.last().unwrap().trim().chars().peekable();
+        let mut chars = input.trim().chars().peekable();
         let mut args: Vec<String> = vec![];
         let mut redirects = vec![];
         let mut in_single_quotes = false;
@@ -191,14 +190,14 @@ impl Command {
                         _ => word_buf.push(next),
                     }
                 }
-                _ => word_buf.push(c) 
+                _ => word_buf.push(c)
             }
         }
 
         if !word_buf.is_empty() {
             args.push(word_buf);
         }
-        
+
         if let Some((fd, mode)) = current_redirect {
             let redirect_path = args.pop().expect(UNEXPECTED_BEHAVIOR_MSG);
 
@@ -209,9 +208,9 @@ impl Command {
             })
         }
 
-        // dbg!(&args);
+        dbg!(&args);
 
-        if let Some(name) = parts.first().cloned() {
+        if let Some(name) = args.first() {
             let name = name.trim();
             let kind = Supported::from_str(name);
             let path = if let Supported::Partial = kind {
@@ -222,7 +221,7 @@ impl Command {
 
             Ok(Some(Self {
                 name: name.to_string(),
-                args,
+                args: args.into_iter().skip(1).collect(),
                 path,
                 kind,
                 redirects,
@@ -239,7 +238,7 @@ impl Command {
         let mut saved_fds = vec![];
 
         for redirect in self.redirects.iter() {
-            // dbg!(&&redirect);
+            dbg!(&&redirect);
 
             let dup_fd = unsafe { dup(redirect.fd) };
             saved_fds.push((redirect.fd, dup_fd));
@@ -424,9 +423,9 @@ impl Command {
         let c_args: Vec<&CStr> = full_args.iter().map(|s| s.as_c_str()).collect();
         let c_env: Vec<&CStr> = vec![];
 
-        // dbg!(&c_command);
-        // dbg!(&c_args);
-        // dbg!(&c_env);
+        dbg!(&c_command);
+        dbg!(&c_args);
+        dbg!(&c_env);
 
         self.with_redirects(|| {
             nix::unistd::execve(&c_command, &c_args, &c_env).unwrap();
