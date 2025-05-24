@@ -1,5 +1,6 @@
 use anyhow::{Context, Ok, Result};
-use nix::libc::{close, dup, dup2, fork, open, waitpid, O_APPEND, O_CREAT, O_WRONLY};
+use nix::libc::{close, dup, dup2, fork, open, waitpid, O_APPEND, O_CREAT, O_RDWR, O_TRUNC};
+use std::io::stdout;
 use std::{
     env::{self, set_current_dir},
     ffi::{CStr, CString},
@@ -63,7 +64,7 @@ enum Target {
     File(PathBuf), // maybe we can do fd redirect
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Mode {
     Write,
     Append,
@@ -112,8 +113,6 @@ impl Supported {
 
 impl Command {
     fn parse(input: &str) -> Result<Option<Self>> {
-        const LITERAL_BACKSLASH: char = '\\';
-
         let parts = input.splitn(2, ' ').collect::<Vec<&str>>();
         let mut chars = parts.last().unwrap().trim().chars().peekable();
         let mut args: Vec<String> = vec![];
@@ -125,14 +124,6 @@ impl Command {
 
         while let Some(c) = chars.next() {
             match c {
-                '"' => {
-                    if !in_single_quotes {
-                        in_double_quotes = !in_double_quotes;
-                        continue;
-                    } else {
-                        word_buf.push(c);
-                    }
-                }
                 '>' if !in_double_quotes && !in_single_quotes => {
                     let mode = if chars.peek() == Some(&'>') {
                         chars.next();
@@ -141,11 +132,19 @@ impl Command {
                         Mode::Write
                     };
 
-                    if let std::result::Result::Ok(num) = word_buf.parse::<i32>() {
+                    if let Result::Ok(num) = word_buf.parse::<i32>() {
                         current_redirect = Some((num, mode));
                         word_buf.clear();
                     } else {
                         current_redirect = Some((1, mode));
+                    }
+                }
+                '"' => {
+                    if !in_single_quotes {
+                        in_double_quotes = !in_double_quotes;
+                        continue;
+                    } else {
+                        word_buf.push(c);
                     }
                 }
                 '\'' => {
@@ -162,7 +161,7 @@ impl Command {
                         word_buf.clear();
                     }
                 }
-                LITERAL_BACKSLASH if in_double_quotes && !in_single_quotes => {
+                '\\' if in_double_quotes && !in_single_quotes => {
                     // only a few chars are escapable in double quotes, in single
                     // quotes, everything is literal
 
@@ -178,7 +177,7 @@ impl Command {
                         _ => word_buf.extend(vec![c, next]),
                     }
                 }
-                LITERAL_BACKSLASH if !in_double_quotes && !in_single_quotes => {
+                '\\' if !in_double_quotes && !in_single_quotes => {
                     // we assume that will never be equals to none. Then it will
                     // escape the \n (hidden) and open a new secundary prompt
                     // in a line down
@@ -192,35 +191,22 @@ impl Command {
                         _ => word_buf.push(next),
                     }
                 }
-                _ => {
-                    if current_redirect.is_none() {
-                        word_buf.push(c);
-                        continue;
-                    }
-
-                    word_buf.push(c);
-                    let (fd, mode) = current_redirect.unwrap();
-                    for next_c in chars.by_ref() {
-                        if next_c == ' ' && (!in_single_quotes || !in_double_quotes) {
-                            break;
-                        }
-
-                        word_buf.push(next_c);
-                    }
-
-                    redirects.push(Redirect {
-                        fd,
-                        mode,
-                        target: Target::File(PathBuf::from(word_buf.trim())),
-                    });
-                    word_buf.clear();
-                    current_redirect = None;
-                }
+                _ => word_buf.push(c) 
             }
         }
 
         if !word_buf.is_empty() {
             args.push(word_buf);
+        }
+        
+        if let Some((fd, mode)) = current_redirect {
+            let redirect_path = args.pop().expect(UNEXPECTED_BEHAVIOR_MSG);
+
+            redirects.push(Redirect {
+                fd,
+                mode,
+                target: Target::File(PathBuf::from(redirect_path)),
+            })
         }
 
         dbg!(&args);
@@ -260,10 +246,10 @@ impl Command {
 
             match &redirect.target {
                 Target::File(path_buf) => {
-                    let mut flags = O_CREAT | O_WRONLY;
-                    if let Mode::Append = redirect.mode {
-                        flags |= O_APPEND;
-                    }
+                    let flags = match redirect.mode {
+                        Mode::Write => O_CREAT | O_RDWR | O_TRUNC,
+                        Mode::Append => O_CREAT | O_RDWR | O_APPEND,
+                    };
 
                     unsafe {
                         let file = open(
@@ -275,6 +261,7 @@ impl Command {
                             )?
                             .as_ptr(),
                             flags,
+                            0o644,
                         );
                         dup2(file, redirect.fd);
                         close(file)
@@ -286,7 +273,7 @@ impl Command {
         let result = exec();
 
         for (fd, saved) in saved_fds {
-            unsafe { 
+            unsafe {
                 dup2(saved, fd);
                 close(saved)
             };
@@ -336,12 +323,14 @@ impl Command {
         }
         match self.kind {
             Supported::Echo => {
-                Self::with_redirects(self, || {
+                self.with_redirects(|| {
+                    let mut stdout = stdout().lock();
+
                     for arg in &self.args {
-                        output_buf.write_all(arg.as_bytes())?;
-                        output_buf.push(b' ');
+                        stdout.write_all(arg.as_bytes())?;
+                        stdout.write_all(b" ")?;
                     }
-                    output_buf.push(b'\n');
+                    stdout.write_all(b"\n")?;
 
                     Ok(())
                 })?;
@@ -435,7 +424,15 @@ impl Command {
         let c_args: Vec<&CStr> = full_args.iter().map(|s| s.as_c_str()).collect();
         let c_env: Vec<&CStr> = vec![];
 
-        nix::unistd::execve(&c_command, &c_args, &c_env)?;
+        dbg!(&c_command);
+        dbg!(&c_args);
+        dbg!(&c_env);
+
+        self.with_redirects(|| {
+            nix::unistd::execve(&c_command, &c_args, &c_env).unwrap();
+            unreachable!()
+        })?;
+
         Ok(())
     }
 
