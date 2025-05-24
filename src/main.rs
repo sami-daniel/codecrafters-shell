@@ -1,21 +1,23 @@
 use anyhow::{Context, Ok, Result};
 use nix::libc::{close, dup, dup2, fork, open, waitpid, O_APPEND, O_CREAT, O_RDWR, O_TRUNC};
-use std::io::stdout;
+use rustyline::{self, completion::Completer, Editor, Helper, Highlighter, Hinter, Validator};
 use std::{
     env::{self, set_current_dir},
     ffi::{CStr, CString},
-    io::{self, Write},
+    io::{stdout, Write},
     path::{Path, PathBuf},
     process::ExitCode,
     ptr::null_mut,
     str::FromStr,
 };
+use rustyline::error::ReadlineError;
 
-const UNEXPECTED_BEHAVIOR_MSG: &str = "Unespected behavior has happened";
+const BUILTIN_A: &'static [&str] = &["echo", "pwd", "cd", "type", "exit"];
+const UNEXPECTED_BEHAVIOR_MSG: &str = "Unexpected behavior has happened";
 
 fn main() -> ExitCode {
     match run() {
-        std::result::Result::Ok(code) => code,
+        Result::Ok(code) => code,
         Err(err) => {
             eprintln!("Error: {}", err);
             ExitCode::FAILURE
@@ -24,26 +26,25 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode> {
-    let mut output_buf = Vec::new();
-    let mut output = io::stdout().lock();
+    let mut editor = Editor::new().context("Failed to create editor")?;
+    editor.set_helper(Some(AwesomeHelper { completer: AwesomeCompleter }));
 
     loop {
-        output_buf.clear();
-        print!("$ ");
-        output.flush().context(UNEXPECTED_BEHAVIOR_MSG)?;
-
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .context(UNEXPECTED_BEHAVIOR_MSG)?;
-
-        if let Some(command) = &mut Command::parse(&input)? {
-            if let Some(code) = command.execute(&mut output_buf)? {
-                return Ok(code);
-            }
+        let readline = editor.readline("$ ");
+        match readline {
+            Result::Ok(line) => {
+                let mut output_buf = Vec::new();
+                if let Some(command) = &mut Command::parse(&line)? {
+                    if let Some(code) = command.execute(&mut output_buf)? {
+                        return Ok(code);
+                    }
+                }
+                stdout().write_all(&output_buf)?;
+            },
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => return Ok(ExitCode::SUCCESS),
+            Err(err) => return Err(err).context("Readline error"),
         }
-
-        output.write_all(&output_buf)?;
     }
 }
 
@@ -76,6 +77,74 @@ struct Command {
     redirects: Vec<Redirect>,
 }
 
+#[derive(Helper, Highlighter, Hinter, Validator)]
+struct AwesomeHelper {
+    completer: AwesomeCompleter,
+}
+
+impl Completer for AwesomeHelper {
+    type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        self.completer.complete(line, pos, ctx)
+    }
+}
+
+fn extract_current_word(line: &str, pos: usize) -> (usize, &str) {
+    let line_up_to_cursor = &line[..pos];
+    if let Some(last_space) = line_up_to_cursor.rfind(' ') {
+        (last_space + 1, &line_up_to_cursor[last_space + 1..])
+    } else {
+        (0, line_up_to_cursor)
+    }
+}
+
+struct AwesomeCompleter;
+
+impl Completer for AwesomeCompleter {
+    type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        let (start, word) = extract_current_word(line, pos);
+        let mut candidates = Vec::new();
+
+        for builtin in BUILTIN_A {
+            if builtin.starts_with(word) {
+                candidates.push(builtin.to_string());
+            }
+        }
+
+        if let Result::Ok(path_dirs) = env::var("PATH") {
+            for dir in path_dirs.split(':') {
+                if let Result::Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.filter_map(Result::ok) {
+                        let entry_name = entry.file_name();
+                        let file_name = entry_name.to_string_lossy();
+                        if file_name.starts_with(word) {
+                            candidates.push(file_name.into_owned());
+                        }
+                    }
+                }
+            }
+        }
+
+        candidates.sort();
+        candidates.dedup();
+
+        Result::Ok((start, candidates))
+    }
+}
+
 #[derive(Debug)]
 struct Redirect {
     fd: i32,
@@ -104,7 +173,11 @@ impl Supported {
     fn is_shell_builtin(command: &str) -> bool {
         matches!(
             Self::from_str(command),
-            Self::Echo | Self::Exit | Self::Type | Self::PrintWorkingDirectory
+            Self::Echo
+                | Self::Exit
+                | Self::Type
+                | Self::PrintWorkingDirectory
+                | Self::ChangeDirectory
         )
     }
 }
@@ -164,7 +237,7 @@ impl Command {
 
                     // we assume that will never be equals to none. This would happen
                     // if and only if the " was not closed, then it will escape the \n
-                    // and open a new secundary prompt in a line down
+                    // and open a new secondary prompt in a line down
                     let next = chars.next().expect(UNEXPECTED_BEHAVIOR_MSG);
 
                     match next {
@@ -176,7 +249,7 @@ impl Command {
                 }
                 '\\' if !in_double_quotes && !in_single_quotes => {
                     // we assume that will never be equals to none. Then it will
-                    // escape the \n (hidden) and open a new secundary prompt
+                    // escape the \n (hidden) and open a new secondary prompt
                     // in a line down
 
                     let next = chars.next().expect(UNEXPECTED_BEHAVIOR_MSG);
@@ -238,8 +311,8 @@ impl Command {
         for redirect in self.redirects.iter() {
             //dbg!(&&redirect);
 
-            let dup_fd = unsafe { dup(redirect.fd) };
-            saved_fds.push((redirect.fd, dup_fd));
+            let original_fd = unsafe { dup(redirect.fd) };
+            saved_fds.push((redirect.fd, original_fd));
 
             match &redirect.target {
                 Target::File(path_buf) => {
