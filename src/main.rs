@@ -30,12 +30,12 @@ fn run() -> Result<ExitCode> {
     loop {
         output_buf.clear();
         print!("$ ");
-        output.flush().context("Failed to flush stdout")?;
+        output.flush().context(UNEXPECTED_BEHAVIOR_MSG)?;
 
         let mut input = String::new();
         io::stdin()
             .read_line(&mut input)
-            .context("Failed to read input")?;
+            .context(UNEXPECTED_BEHAVIOR_MSG)?;
 
         if let Some(command) = &mut Command::parse(&input)? {
             if let Some(code) = command.execute(&mut output_buf)? {
@@ -43,9 +43,7 @@ fn run() -> Result<ExitCode> {
             }
         }
 
-        output
-            .write_all(&output_buf)
-            .context("Failed to write output")?;
+        output.write_all(&output_buf)?;
     }
 }
 
@@ -190,7 +188,7 @@ impl Command {
                         _ => word_buf.push(next),
                     }
                 }
-                _ => word_buf.push(c)
+                _ => word_buf.push(c),
             }
         }
 
@@ -409,9 +407,9 @@ impl Command {
         let c_command = CString::new(
             self.path
                 .as_ref()
-                .context("Missing executable path")?
+                .expect(UNEXPECTED_BEHAVIOR_MSG)
                 .to_str()
-                .context("Path contains invalid UTF-8")?,
+                .context(UNEXPECTED_BEHAVIOR_MSG)?,
         )?;
         let mut full_args = vec![CString::new(self.name.clone())?];
         full_args.extend(
@@ -438,11 +436,11 @@ impl Command {
     fn get_cwd() -> Result<String> {
         Ok(env::current_dir()?
             .to_str()
-            .context("Invalid current dir")?
+            .context(UNEXPECTED_BEHAVIOR_MSG)?
             .to_string())
     }
 
     fn get_home() -> Result<String> {
-        env::var("HOME").context("Missing HOME variable")
+        env::var("HOME").context(UNEXPECTED_BEHAVIOR_MSG)
     }
 }
