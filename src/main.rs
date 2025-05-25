@@ -1,3 +1,5 @@
+#![allow(static_mut_refs)]
+
 use anyhow::{Context, Ok, Result};
 use nix::libc::{close, dup, dup2, fork, open, waitpid, O_APPEND, O_CREAT, O_RDWR, O_TRUNC};
 use nix::unistd::ForkResult;
@@ -21,9 +23,9 @@ use std::{
 const BUILTIN_A: &[&str] = &["echo", "pwd", "cd", "type", "exit", "history"];
 const UNEXPECTED_BEHAVIOR_MSG: &str = "Unexpected behavior has happened";
 // https://users.rust-lang.org/t/declaring-a-global-vector-in-rust/72511/12.
-// we can securely this, since we dont mutate while has a ref to it, cause 
+// we can securely this, since we dont mutate while has a ref to it, cause
 // rust does not have an sync mechanism
-static mut HISTORY: Vec<String> = vec![]; 
+static mut HISTORY: Vec<String> = vec![];
 
 fn main() -> ExitCode {
     match run() {
@@ -77,9 +79,9 @@ fn execute_pipeline(
     for _ in 0..num_commands - 1 {
         pipes.push(nix::unistd::pipe()?);
     }
-    
+
     // dbg!(&pipes);
-    
+
     let mut children = Vec::new();
 
     for (index, mut command) in commands.into_iter().enumerate() {
@@ -116,7 +118,7 @@ fn execute_pipeline(
                         nix::unistd::close(w_fd)?;
                     }
                 }
-                
+
                 command.execute(true)?;
 
                 std::process::exit(0);
@@ -341,7 +343,7 @@ impl Command {
         unsafe {
             HISTORY.push(input.to_string());
         }
-        
+
         let mut chars = input.trim().chars().peekable();
         let mut args: Vec<String> = vec![];
         let mut redirects = vec![];
@@ -660,13 +662,13 @@ impl Command {
                 self.with_redirects(|| {
                     unsafe {
                         for (index, entry) in HISTORY.iter().enumerate() {
-                            // writeln!(stdout, "{} ")
+                            writeln!(stdout, "\t {}  {}", (index + 1), entry)?;
                         }
                     }
-                    
+
                     Ok(())
                 })?;
-                
+
                 Ok(None)
             }
         }
