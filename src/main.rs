@@ -679,7 +679,7 @@ impl Command {
                                 writeln!(stdout, "\t {}  {}", entry.index, entry.val)?;
                             }
                         } else {
-                            for entry in HISTORY.iter().rev().take(take) {
+                            for entry in HISTORY.iter().rev().take(take).rev() {
                                 writeln!(stdout, "\t {}  {}", entry.index, entry.val)?;
                             }
                         }
