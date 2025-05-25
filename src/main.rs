@@ -18,8 +18,12 @@ use std::{
     str::FromStr,
 };
 
-const BUILTIN_A: &[&str] = &["echo", "pwd", "cd", "type", "exit"];
+const BUILTIN_A: &[&str] = &["echo", "pwd", "cd", "type", "exit", "history"];
 const UNEXPECTED_BEHAVIOR_MSG: &str = "Unexpected behavior has happened";
+// https://users.rust-lang.org/t/declaring-a-global-vector-in-rust/72511/12.
+// we can securely this, since we dont mutate while has a ref to it, cause 
+// rust does not have an sync mechanism
+static mut HISTORY: Vec<String> = vec![]; 
 
 fn main() -> ExitCode {
     match run() {
@@ -103,8 +107,7 @@ fn execute_pipeline(
                     // nix::unistd::close(pipe_out.as_raw_fd())?;
                 }
 
-                for (r, w) in &pipes {
-                    let r_fd = r.as_raw_fd();
+                for (_, w) in &pipes {
                     let w_fd = w.as_raw_fd();
                     // if r_fd != 0 && r_fd != 1 {
                     //     nix::unistd::close(r_fd)?;
@@ -194,6 +197,7 @@ enum Supported {
     Unknown,
     PrintWorkingDirectory,
     ChangeDirectory,
+    History
 }
 
 #[derive(Debug)]
@@ -308,6 +312,7 @@ impl Supported {
             "type" => Self::Type,
             "pwd" => Self::PrintWorkingDirectory,
             "cd" => Self::ChangeDirectory,
+            "history" => Self::History,
             _ => {
                 if Command::exists(command) {
                     Self::Partial
@@ -326,12 +331,17 @@ impl Supported {
                 | Self::Type
                 | Self::PrintWorkingDirectory
                 | Self::ChangeDirectory
+                | Self::History
         )
     }
 }
 
 impl Command {
     fn parse(input: &str) -> Result<Option<Self>> {
+        unsafe {
+            HISTORY.push(input.to_string());
+        }
+        
         let mut chars = input.trim().chars().peekable();
         let mut args: Vec<String> = vec![];
         let mut redirects = vec![];
@@ -574,7 +584,8 @@ impl Command {
                             writeln!(stdout, "{} is a shell builtin", cmd)?;
                         } else if let Some(command) = Self::load_extern(cmd) {
                             writeln!(stdout, "{} is {}", cmd, command.path.unwrap().display())?;
-                        } else {
+                        }
+                        else {
                             writeln!(stdout, "{}: not found", cmd)?;
                         }
                     }
@@ -643,6 +654,19 @@ impl Command {
                     })?
                 }
 
+                Ok(None)
+            }
+            Supported::History => {
+                self.with_redirects(|| {
+                    unsafe {
+                        for (index, entry) in HISTORY.iter().enumerate() {
+                            // writeln!(stdout, "{} ")
+                        }
+                    }
+                    
+                    Ok(())
+                })?;
+                
                 Ok(None)
             }
         }
