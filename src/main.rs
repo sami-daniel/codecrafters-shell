@@ -7,7 +7,7 @@ use rustyline::{
     self, completion::Completer, CompletionType, Config, Editor, Helper, Highlighter, Hinter,
     Validator,
 };
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd};
 use std::{
     env::{self, set_current_dir},
     ffi::{CStr, CString},
@@ -47,7 +47,7 @@ fn run() -> Result<ExitCode> {
         match readline {
             Result::Ok(line) => {
                 let commands = parse_pipeline(&line)?;
-                if let Some(code) = execute_pipeline(commands, &mut vec![])? {
+                if let Some(code) = execute_pipeline(commands)? {
                     return Ok(code);
                 }
             }
@@ -60,14 +60,13 @@ fn run() -> Result<ExitCode> {
 
 fn execute_pipeline(
     mut commands: Vec<Command>,
-    output_buf: &mut Vec<u8>,
 ) -> Result<Option<ExitCode>> {
     let num_commands = commands.len();
     if num_commands == 0 {
         return Ok(None);
     }
     if num_commands == 1 {
-        return commands[0].execute(output_buf, false);
+        return commands[0].execute(false);
     }
 
     let mut pipes = Vec::new();
@@ -82,9 +81,9 @@ fn execute_pipeline(
         let stdout_pipe = pipes.get(index).map(|p| p.1.as_fd());
 
         let pid = unsafe { nix::unistd::fork() };
-        
+
         match pid {
-            Result::Ok(ForkResult::Child) => { 
+            Result::Ok(ForkResult::Child) => {
                 if let Some(pipe_in) = stdin_pipe {
                     if !has_redirect(&command, 0) {
                         unsafe {
@@ -113,8 +112,8 @@ fn execute_pipeline(
                         nix::unistd::close(w_fd)?;
                     }
                 }
-                
-                let _ = command.execute(output_buf, true)?;
+
+                let _ = command.execute(true)?;
                 std::process::exit(0);
             }
             Result::Ok(ForkResult::Parent { child, .. }) => children.push(child),
@@ -284,7 +283,7 @@ impl Completer for AwesomeCompleter {
             .iter()
             .map(|c| Pair {
                 display: c.to_string(),
-                replacement: format!("{} ", c).to_string()
+                replacement: format!("{} ", c).to_string(),
             })
             .collect::<Vec<_>>();
 
@@ -531,7 +530,9 @@ impl Command {
         Self::load_extern_path(path).is_some()
     }
 
-    fn execute(&mut self, output_buf: &mut Vec<u8>, in_pipeline: bool) -> Result<Option<ExitCode>> {
+    fn execute(&mut self, in_pipeline: bool) -> Result<Option<ExitCode>> {
+        let mut stdout = stdout().lock();
+
         for i in 0..self.args.len() {
             if self.args[i].contains("~") {
                 let new = self.args[i].replace("~", Self::get_home()?.as_str());
@@ -541,8 +542,6 @@ impl Command {
         match self.kind {
             Supported::Echo => {
                 self.with_redirects(|| {
-                    let mut stdout = stdout().lock();
-
                     for arg in &self.args {
                         stdout.write_all(arg.as_bytes())?;
                         stdout.write_all(b" ")?;
@@ -563,19 +562,29 @@ impl Command {
                 Ok(Some(ExitCode::from(code)))
             }
             Supported::Type => {
-                if let Some(cmd) = self.args.first() {
-                    if Supported::is_shell_builtin(cmd) {
-                        writeln!(output_buf, "{} is a shell builtin", cmd)?;
-                    } else if let Some(command) = Self::load_extern(cmd) {
-                        writeln!(output_buf, "{} is {}", cmd, command.path.unwrap().display())?;
-                    } else {
-                        writeln!(output_buf, "{}: not found", cmd)?;
+                Self::with_redirects(&self, || {
+                    if let Some(cmd) = self.args.first() {
+                        if Supported::is_shell_builtin(cmd) {
+                            writeln!(stdout, "{} is a shell builtin", cmd)?;
+                        } else if let Some(command) = Self::load_extern(cmd) {
+                            writeln!(stdout, "{} is {}", cmd, command.path.unwrap().display())?;
+                        } else {
+                            writeln!(stdout, "{}: not found", cmd)?;
+                        }
                     }
-                }
+
+                    Ok(())
+                })?;
+
                 Ok(None)
             }
             Supported::Unknown => {
-                writeln!(output_buf, "{}: command not found", self.name)?;
+                Self::with_redirects(&self, || {
+                    writeln!(stdout, "{}: command not found", self.name)?;
+
+                    Ok(())
+                })?;
+
                 Ok(None)
             }
             Supported::Partial => {
@@ -599,7 +608,12 @@ impl Command {
                 }
             }
             Supported::PrintWorkingDirectory => {
-                writeln!(output_buf, "{}", Self::get_cwd()?)?;
+                Self::with_redirects(&self, || {
+                    writeln!(stdout, "{}", Self::get_cwd()?)?;
+
+                    Ok(())
+                })?;
+
                 Ok(None)
             }
             Supported::ChangeDirectory => {
@@ -614,7 +628,7 @@ impl Command {
                 if set_current_dir(&path).is_err() {
                     Self::with_redirects(self, || {
                         writeln!(
-                            output_buf,
+                            stdout,
                             "cd: {}: No such file or directory",
                             path.display()
                         )?;
