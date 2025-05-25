@@ -74,6 +74,8 @@ fn execute_pipeline(
         pipes.push(nix::unistd::pipe()?);
     }
 
+    // dbg!(&pipes);
+
     let mut children = Vec::new();
 
     for (index, mut command) in commands.into_iter().enumerate() {
@@ -81,7 +83,6 @@ fn execute_pipeline(
         let stdout_pipe = pipes.get(index).map(|p| p.1.as_fd());
 
         let pid = unsafe { nix::unistd::fork() };
-
         match pid {
             Result::Ok(ForkResult::Child) => {
                 if let Some(pipe_in) = stdin_pipe {
@@ -102,21 +103,22 @@ fn execute_pipeline(
                     // nix::unistd::close(pipe_out.as_raw_fd())?;
                 }
 
-                for (r, w) in &pipes {
-                    let r_fd = r.as_raw_fd();
-                    let w_fd = w.as_raw_fd();
-                    if r_fd != 0 && r_fd != 1 {
-                        nix::unistd::close(r_fd)?;
-                    }
-                    if w_fd != 0 && w_fd != 1 {
-                        nix::unistd::close(w_fd)?;
-                    }
-                }
+                // for (r, w) in &pipes {
+                //     let r_fd = r.as_raw_fd();
+                //     let w_fd = w.as_raw_fd();
+                //     if r_fd != 0 && r_fd != 1 {
+                //         nix::unistd::close(r_fd)?;
+                //     }
+                //     if w_fd != 0 && w_fd != 1 {
+                //         nix::unistd::close(w_fd)?;
+                //     }
+                // }
 
-                let _ = command.execute(true)?;
+                command.execute(true)?;
+
                 std::process::exit(0);
             }
-            Result::Ok(ForkResult::Parent { child, .. }) => children.push(child),
+            Result::Ok(ForkResult::Parent { child }) => children.push(child),
             Err(e) => return Err(e).context("Fork failed"),
         }
 
@@ -545,8 +547,8 @@ impl Command {
                     let mut peekable = self.args.iter().peekable();
                     while let Some(arg) = peekable.next() {
                         stdout.write_all(arg.as_bytes())?;
-                        
-                        if peekable.peek() != None {
+
+                        if peekable.peek().is_some() {
                             stdout.write_all(b" ")?;
                         }
                     }
@@ -566,7 +568,7 @@ impl Command {
                 Ok(Some(ExitCode::from(code)))
             }
             Supported::Type => {
-                Self::with_redirects(&self, || {
+                Self::with_redirects(self, || {
                     if let Some(cmd) = self.args.first() {
                         if Supported::is_shell_builtin(cmd) {
                             writeln!(stdout, "{} is a shell builtin", cmd)?;
@@ -583,7 +585,7 @@ impl Command {
                 Ok(None)
             }
             Supported::Unknown => {
-                Self::with_redirects(&self, || {
+                Self::with_redirects(self, || {
                     writeln!(stdout, "{}: command not found", self.name)?;
 
                     Ok(())
@@ -612,7 +614,7 @@ impl Command {
                 }
             }
             Supported::PrintWorkingDirectory => {
-                Self::with_redirects(&self, || {
+                Self::with_redirects(self, || {
                     writeln!(stdout, "{}", Self::get_cwd()?)?;
 
                     Ok(())
