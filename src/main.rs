@@ -25,7 +25,7 @@ const UNEXPECTED_BEHAVIOR_MSG: &str = "Unexpected behavior has happened";
 // https://users.rust-lang.org/t/declaring-a-global-vector-in-rust/72511/12.
 // we can securely this, since we dont mutate while has a ref to it, cause
 // rust does not have an sync mechanism
-static mut HISTORY: Vec<String> = vec![];
+static mut HISTORY: Vec<HistoryPair> = vec![];
 
 fn main() -> ExitCode {
     match run() {
@@ -64,9 +64,7 @@ fn run() -> Result<ExitCode> {
     }
 }
 
-fn execute_pipeline(
-    mut commands: Vec<Command>,
-) -> Result<Option<ExitCode>> {
+fn execute_pipeline(mut commands: Vec<Command>) -> Result<Option<ExitCode>> {
     let num_commands = commands.len();
     if num_commands == 0 {
         return Ok(None);
@@ -199,7 +197,7 @@ enum Supported {
     Unknown,
     PrintWorkingDirectory,
     ChangeDirectory,
-    History
+    History,
 }
 
 #[derive(Debug)]
@@ -211,6 +209,11 @@ enum Target {
 enum Mode {
     Write,
     Append,
+}
+
+struct HistoryPair {
+    index: usize,
+    val: String,
 }
 
 struct Command {
@@ -341,7 +344,16 @@ impl Supported {
 impl Command {
     fn parse(input: &str) -> Result<Option<Self>> {
         unsafe {
-            HISTORY.push(input.to_string());
+            let index = if let Some(reg) = HISTORY.last() {
+                reg.index + 1
+            } else {
+                1
+            };
+
+            HISTORY.push(HistoryPair {
+                index,
+                val: input.to_string(),
+            });
         }
 
         let mut chars = input.trim().chars().peekable();
@@ -586,8 +598,7 @@ impl Command {
                             writeln!(stdout, "{} is a shell builtin", cmd)?;
                         } else if let Some(command) = Self::load_extern(cmd) {
                             writeln!(stdout, "{} is {}", cmd, command.path.unwrap().display())?;
-                        }
-                        else {
+                        } else {
                             writeln!(stdout, "{}: not found", cmd)?;
                         }
                     }
@@ -646,11 +657,7 @@ impl Command {
 
                 if set_current_dir(&path).is_err() {
                     Self::with_redirects(self, || {
-                        writeln!(
-                            stdout,
-                            "cd: {}: No such file or directory",
-                            path.display()
-                        )?;
+                        writeln!(stdout, "cd: {}: No such file or directory", path.display())?;
 
                         Ok(())
                     })?
@@ -661,8 +668,14 @@ impl Command {
             Supported::History => {
                 self.with_redirects(|| {
                     unsafe {
-                        for (index, entry) in HISTORY.iter().enumerate() {
-                            writeln!(stdout, "\t {}  {}", (index + 1), entry)?;
+                        let take = self
+                            .args
+                            .first()
+                            .expect(UNEXPECTED_BEHAVIOR_MSG)
+                            .parse::<usize>()
+                            .expect(UNEXPECTED_BEHAVIOR_MSG);
+                        for entry in HISTORY.iter().skip(HISTORY.len() - take) {
+                            writeln!(stdout, "\t {}  {}", entry.index, entry.val)?;
                         }
                     }
 
