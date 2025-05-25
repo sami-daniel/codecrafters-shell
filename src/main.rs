@@ -74,7 +74,7 @@ fn execute_pipeline(
         pipes.push(nix::unistd::pipe()?);
     }
     
-    dbg!(&pipes);
+    // dbg!(&pipes);
     
     let mut children = Vec::new();
 
