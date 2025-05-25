@@ -542,9 +542,13 @@ impl Command {
         match self.kind {
             Supported::Echo => {
                 self.with_redirects(|| {
-                    for arg in &self.args {
+                    let mut peekable = self.args.iter().peekable();
+                    while let Some(arg) = peekable.next() {
                         stdout.write_all(arg.as_bytes())?;
-                        stdout.write_all(b" ")?;
+                        
+                        if peekable.peek() != None {
+                            stdout.write_all(b" ")?;
+                        }
                     }
                     stdout.write_all(b"\n")?;
 
