@@ -73,9 +73,9 @@ fn execute_pipeline(
     for _ in 0..num_commands - 1 {
         pipes.push(nix::unistd::pipe()?);
     }
-
-    // dbg!(&pipes);
-
+    
+    dbg!(&pipes);
+    
     let mut children = Vec::new();
 
     for (index, mut command) in commands.into_iter().enumerate() {
@@ -103,17 +103,17 @@ fn execute_pipeline(
                     // nix::unistd::close(pipe_out.as_raw_fd())?;
                 }
 
-                // for (r, w) in &pipes {
-                //     let r_fd = r.as_raw_fd();
-                //     let w_fd = w.as_raw_fd();
-                //     if r_fd != 0 && r_fd != 1 {
-                //         nix::unistd::close(r_fd)?;
-                //     }
-                //     if w_fd != 0 && w_fd != 1 {
-                //         nix::unistd::close(w_fd)?;
-                //     }
-                // }
-
+                for (r, w) in &pipes {
+                    let r_fd = r.as_raw_fd();
+                    let w_fd = w.as_raw_fd();
+                    // if r_fd != 0 && r_fd != 1 {
+                    //     nix::unistd::close(r_fd)?;
+                    // }
+                    if w_fd != 0 && w_fd != 1 {
+                        nix::unistd::close(w_fd)?;
+                    }
+                }
+                
                 command.execute(true)?;
 
                 std::process::exit(0);
