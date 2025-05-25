@@ -1,6 +1,7 @@
 use anyhow::{Context, Ok, Result};
 use nix::libc::{close, dup, dup2, fork, open, waitpid, O_APPEND, O_CREAT, O_RDWR, O_TRUNC};
 use nix::unistd::ForkResult;
+use rustyline::completion::Pair;
 use rustyline::error::ReadlineError;
 use rustyline::{
     self, completion::Completer, CompletionType, Config, Editor, Helper, Highlighter, Hinter,
@@ -223,7 +224,7 @@ struct AwesomeHelper {
 impl Helper for AwesomeHelper {}
 
 impl Completer for AwesomeHelper {
-    type Candidate = String;
+    type Candidate = Pair;
 
     fn complete(
         &self,
@@ -245,7 +246,7 @@ fn extract_current_word(line: &str, pos: usize) -> (usize, &str) {
 }
 
 impl Completer for AwesomeCompleter {
-    type Candidate = String;
+    type Candidate = Pair;
 
     fn complete(
         &self,
@@ -281,7 +282,10 @@ impl Completer for AwesomeCompleter {
 
         let candidates = candidates
             .iter()
-            .map(|c| format!("{c} "))
+            .map(|c| Pair {
+                display: c.to_string(),
+                replacement: format!("{} ", c).to_string()
+            })
             .collect::<Vec<_>>();
 
         Result::Ok((start, candidates))
