@@ -1,6 +1,12 @@
 use anyhow::{Context, Ok, Result};
 use nix::libc::{close, dup, dup2, fork, open, waitpid, O_APPEND, O_CREAT, O_RDWR, O_TRUNC};
-use rustyline::{self, completion::Completer, CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator};
+use nix::unistd::ForkResult;
+use rustyline::error::ReadlineError;
+use rustyline::{
+    self, completion::Completer, CompletionType, Config, Editor, Helper, Highlighter, Hinter,
+    Validator,
+};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::{
     env::{self, set_current_dir},
     ffi::{CStr, CString},
@@ -10,9 +16,8 @@ use std::{
     ptr::null_mut,
     str::FromStr,
 };
-use rustyline::error::ReadlineError;
 
-const BUILTIN_A: &'static [&str] = &["echo", "pwd", "cd", "type", "exit"];
+const BUILTIN_A: &[&str] = &["echo", "pwd", "cd", "type", "exit"];
 const UNEXPECTED_BEHAVIOR_MSG: &str = "Unexpected behavior has happened";
 
 fn main() -> ExitCode {
@@ -31,25 +36,152 @@ fn run() -> Result<ExitCode> {
         .completion_type(CompletionType::List)
         .build();
     let mut editor = Editor::with_config(config).context("Failed to create editor")?;
-    editor.set_helper(Some(AwesomeHelper { completer: AwesomeCompleter }));
-    
+    editor.set_helper(Some(AwesomeHelper {
+        completer: AwesomeCompleter,
+    }));
+
     loop {
         let readline = editor.readline("$ ");
+
         match readline {
             Result::Ok(line) => {
-                let mut output_buf = Vec::new();
-                if let Some(command) = &mut Command::parse(&line)? {
-                    if let Some(code) = command.execute(&mut output_buf)? {
-                        return Ok(code);
-                    }
+                let commands = parse_pipeline(&line)?;
+                if let Some(code) = execute_pipeline(commands, &mut vec![])? {
+                    return Ok(code);
                 }
-                stdout().write_all(&output_buf)?;
-            },
+            }
             Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => return Ok(ExitCode::SUCCESS),
             Err(err) => return Err(err).context("Readline error"),
         }
     }
+}
+
+fn execute_pipeline(
+    mut commands: Vec<Command>,
+    output_buf: &mut Vec<u8>,
+) -> Result<Option<ExitCode>> {
+    let num_commands = commands.len();
+    if num_commands == 0 {
+        return Ok(None);
+    }
+    if num_commands == 1 {
+        return commands[0].execute(output_buf, false);
+    }
+
+    let mut pipes = Vec::new();
+    for _ in 0..num_commands - 1 {
+        pipes.push(nix::unistd::pipe()?);
+    }
+
+    let mut children = Vec::new();
+
+    for (index, mut command) in commands.into_iter().enumerate() {
+        let stdin_pipe = index.checked_sub(1).map(|i| pipes[i].0.as_fd());
+        let stdout_pipe = pipes.get(index).map(|p| p.1.as_fd());
+
+        let pid = unsafe { nix::unistd::fork() };
+        
+        match pid {
+            Result::Ok(ForkResult::Child) => { 
+                if let Some(pipe_in) = stdin_pipe {
+                    if !has_redirect(&command, 0) {
+                        unsafe {
+                            dup2(pipe_in.as_raw_fd(), 0);
+                        }
+                    }
+                    // nix::unistd::close(pipe_in.as_raw_fd())?;
+                }
+
+                if let Some(pipe_out) = stdout_pipe {
+                    if !has_redirect(&command, 1) {
+                        unsafe {
+                            dup2(pipe_out.as_raw_fd(), 1);
+                        }
+                    }
+                    // nix::unistd::close(pipe_out.as_raw_fd())?;
+                }
+
+                for (r, w) in &pipes {
+                    let r_fd = r.as_raw_fd();
+                    let w_fd = w.as_raw_fd();
+                    if r_fd != 0 && r_fd != 1 {
+                        nix::unistd::close(r_fd)?;
+                    }
+                    if w_fd != 0 && w_fd != 1 {
+                        nix::unistd::close(w_fd)?;
+                    }
+                }
+                
+                let _ = command.execute(output_buf, true)?;
+                std::process::exit(0);
+            }
+            Result::Ok(ForkResult::Parent { child, .. }) => children.push(child),
+            Err(e) => return Err(e).context("Fork failed"),
+        }
+
+        // if let Some(pipe_in) = stdin_pipe {
+        //     nix::unistd::close(pipe_in.as_raw_fd())?;
+        // }
+        // if let Some(pipe_out) = stdout_pipe {
+        //     nix::unistd::close(pipe_out.as_raw_fd())?;
+        // }
+    }
+
+    for (r, w) in pipes {
+        nix::unistd::close(r)?;
+        nix::unistd::close(w)?;
+    }
+
+    for pid in children {
+        nix::sys::wait::waitpid(pid, None)?;
+    }
+
+    Ok(None)
+}
+
+fn has_redirect(cmd: &Command, fd: i32) -> bool {
+    cmd.redirects.iter().any(|r| r.fd == fd)
+}
+
+fn parse_pipeline(input: &str) -> Result<Vec<Command>> {
+    let mut commands = Vec::new();
+    let mut current = input.trim();
+
+    while let Some(pos) = find_pipe_pos(current) {
+        let (cmd, rest) = current.split_at(pos);
+        let command = Command::parse(cmd)?.unwrap();
+        commands.push(command);
+        current = rest[1..].trim_start();
+    }
+
+    if !current.is_empty() {
+        let command = Command::parse(current)?.unwrap();
+        commands.push(command);
+    }
+
+    Ok(commands)
+}
+
+fn find_pipe_pos(s: &str) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+
+    for (i, c) in s.chars().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match c {
+            '\\' => escape = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '|' if !in_single && !in_double => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 enum Supported {
@@ -88,7 +220,7 @@ struct AwesomeHelper {
     completer: AwesomeCompleter,
 }
 
-impl Helper for AwesomeHelper { }
+impl Helper for AwesomeHelper {}
 
 impl Completer for AwesomeHelper {
     type Candidate = String;
@@ -147,7 +279,10 @@ impl Completer for AwesomeCompleter {
         candidates.sort();
         candidates.dedup();
 
-        let candidates = candidates.iter().map(|c| format!("{c} ")).collect::<Vec<_>>();
+        let candidates = candidates
+            .iter()
+            .map(|c| format!("{c} "))
+            .collect::<Vec<_>>();
 
         Result::Ok((start, candidates))
     }
@@ -392,7 +527,7 @@ impl Command {
         Self::load_extern_path(path).is_some()
     }
 
-    fn execute(&mut self, output_buf: &mut Vec<u8>) -> Result<Option<ExitCode>> {
+    fn execute(&mut self, output_buf: &mut Vec<u8>, in_pipeline: bool) -> Result<Option<ExitCode>> {
         for i in 0..self.args.len() {
             if self.args[i].contains("~") {
                 let new = self.args[i].replace("~", Self::get_home()?.as_str());
@@ -440,17 +575,22 @@ impl Command {
                 Ok(None)
             }
             Supported::Partial => {
-                let pid = unsafe { fork() };
-                match pid {
-                    0 => {
-                        self.exec_from_execve()?;
-                        Ok(None)
-                    }
-                    _ => {
-                        unsafe {
-                            waitpid(0, null_mut(), 0);
+                if in_pipeline {
+                    self.exec_from_execve()?;
+                    Ok(None)
+                } else {
+                    let pid = unsafe { fork() };
+                    match pid {
+                        0 => {
+                            self.exec_from_execve()?;
+                            Ok(None)
                         }
-                        Ok(None)
+                        _ => {
+                            unsafe {
+                                waitpid(0, null_mut(), 0);
+                            }
+                            Ok(None)
+                        }
                     }
                 }
             }
