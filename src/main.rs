@@ -671,11 +671,17 @@ impl Command {
                         let take = self
                             .args
                             .first()
-                            .expect(UNEXPECTED_BEHAVIOR_MSG)
+                            .unwrap_or(&"0".to_string())
                             .parse::<usize>()
                             .expect(UNEXPECTED_BEHAVIOR_MSG);
-                        for entry in HISTORY.iter().skip(HISTORY.len() - take) {
-                            writeln!(stdout, "\t {}  {}", entry.index, entry.val)?;
+                        if take == 0 {
+                            for entry in HISTORY.iter() {
+                                writeln!(stdout, "\t {}  {}", entry.index, entry.val)?;
+                            }
+                        } else {
+                            for entry in HISTORY.iter().rev().take(take) {
+                                writeln!(stdout, "\t {}  {}", entry.index, entry.val)?;
+                            }
                         }
                     }
 
